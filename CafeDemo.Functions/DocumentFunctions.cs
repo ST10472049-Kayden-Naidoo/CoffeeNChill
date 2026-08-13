@@ -7,7 +7,6 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Net.Http.Headers;
-using Microsoft.Extensions.Primitives;
 
 namespace CafeDemo.Functions.Functions;
 
@@ -16,11 +15,18 @@ public class DocumentFunctions
     private const string ContainerName = "staff-docs";
     private readonly BlobServiceClient _blobServiceClient;
     private readonly ILogger<DocumentFunctions> _logger;
-    private static readonly HashSet<string> AllowedContentTypes = new(StringComparer.OrdinalIgnoreCase) { "application/pdf","image/png","image/jpeg","text/plain" };
+    private static readonly HashSet<string> AllowedContentTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "text/plain"
+    };
 
     public DocumentFunctions(BlobServiceClient blobServiceClient, ILogger<DocumentFunctions> logger)
     {
-        _blobServiceClient = blobServiceClient; _logger = logger;
+        _blobServiceClient = blobServiceClient;
+        _logger = logger;
     }
 
     private async Task<BlobContainerClient> GetContainerClientAsync()
@@ -41,11 +47,23 @@ public class DocumentFunctions
     [Function("UploadStaffDocument")]
     public async Task<HttpResponseData> UploadStaffDocument([HttpTrigger(AuthorizationLevel.Function, "post", Route = "documents/upload")] HttpRequestData req)
     {
-        if (!req.Headers.TryGetValues("Content-Type", out var cvals)) return JsonResponse(req, new { error = "Missing Content-Type" }, HttpStatusCode.BadRequest);
+        if (!req.Headers.TryGetValues("Content-Type", out var cvals))
+            return JsonResponse(req, new { error = "Missing Content-Type" }, HttpStatusCode.BadRequest);
+
         var contentType = cvals.First();
-        var mediaType = MediaTypeHeaderValue.Parse(contentType);
+        MediaTypeHeaderValue mediaType;
+        try
+        {
+            mediaType = MediaTypeHeaderValue.Parse(contentType);
+        }
+        catch
+        {
+            return JsonResponse(req, new { error = "Invalid Content-Type header." }, HttpStatusCode.BadRequest);
+        }
+
         var boundary = HeaderUtilities.RemoveQuotes(mediaType.Boundary).Value;
-        if (string.IsNullOrEmpty(boundary)) return JsonResponse(req, new { error = "No boundary" }, HttpStatusCode.BadRequest);
+        if (string.IsNullOrEmpty(boundary))
+            return JsonResponse(req, new { error = "No boundary" }, HttpStatusCode.BadRequest);
 
         var reader = new MultipartReader(boundary, req.Body);
         MultipartSection? section;
@@ -53,16 +71,32 @@ public class DocumentFunctions
 
         while ((section = await reader.ReadNextSectionAsync()) != null)
         {
-            if (!ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var disp)) continue;
-            var hasFile = !StringValues.IsNullOrEmpty(disp.FileName) || !StringValues.IsNullOrEmpty(disp.FileNameStar);
-            if (!hasFile) continue;
-            var fileName = (!StringValues.IsNullOrEmpty(disp.FileNameStar) ? disp.FileNameStar.Value : disp.FileName.Value).Trim('"');
-            var partContentType = section.Headers?.ContentType ?? "application/octet-stream";
-            if (!AllowedContentTypes.Contains(partContentType)) return JsonResponse(req, new { error = "Unsupported type" }, HttpStatusCode.UnsupportedMediaType);
+            // Parse content-disposition to find file parts
+            if (!ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var disp))
+                continue;
+
+            // disp.FileName and FileNameStar are StringSegment; check HasValue
+            var fileNameSegment = disp.FileNameStar.HasValue ? disp.FileNameStar : disp.FileName;
+            if (fileNameSegment == null || !fileNameSegment.HasValue)
+                continue;
+
+            var fileName = fileNameSegment.Value.Trim('"');
+
+            // Read Content-Type header from section.Headers (dictionary)
+            string partContentType = "application/octet-stream";
+            if (section.Headers != null && section.Headers.TryGetValue("Content-Type", out var headerValues))
+                partContentType = headerValues.ToString();
+
+            if (!AllowedContentTypes.Contains(partContentType))
+                return JsonResponse(req, new { error = $"Content-Type '{partContentType}' not allowed." }, HttpStatusCode.UnsupportedMediaType);
+
             var blob = container.GetBlobClient(fileName);
             await blob.UploadAsync(section.Body, new BlobHttpHeaders { ContentType = partContentType });
-            return JsonResponse(req, new { fileName }, HttpStatusCode.OK);
+            _logger.LogInformation("Uploaded file {FileName}", fileName);
+
+            return JsonResponse(req, new { fileName, contentType = partContentType }, HttpStatusCode.OK);
         }
+
         return JsonResponse(req, new { error = "No file part" }, HttpStatusCode.BadRequest);
     }
 
@@ -71,7 +105,8 @@ public class DocumentFunctions
     {
         var container = await GetContainerClientAsync();
         var list = new List<object>();
-        await foreach (var b in container.GetBlobsAsync()) list.Add(new { fileName = b.Name, size = b.Properties.ContentLength, lastModified = b.Properties.LastModified, contentType = b.Properties.ContentType });
+        await foreach (var b in container.GetBlobsAsync())
+            list.Add(new { fileName = b.Name, size = b.Properties.ContentLength, lastModified = b.Properties.LastModified, contentType = b.Properties.ContentType });
         return JsonResponse(req, list, HttpStatusCode.OK);
     }
 
@@ -80,7 +115,9 @@ public class DocumentFunctions
     {
         var container = await GetContainerClientAsync();
         var blob = container.GetBlobClient(fileName);
-        if (!await blob.ExistsAsync()) return JsonResponse(req, new { error = "Not found" }, HttpStatusCode.NotFound);
+        if (!await blob.ExistsAsync())
+            return JsonResponse(req, new { error = "Not found" }, HttpStatusCode.NotFound);
+
         var dl = await blob.DownloadStreamingAsync();
         var resp = req.CreateResponse(HttpStatusCode.OK);
         resp.Headers.Add("Content-Type", dl.Value.Details.ContentType ?? "application/octet-stream");
