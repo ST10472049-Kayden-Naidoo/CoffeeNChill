@@ -1,32 +1,29 @@
-# Multi-stage build for optimization
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
-WORKDIR /src
+# See https://aka.ms/customizecontainer to learn how to customize your debug container and how Visual Studio uses this Dockerfile to build your images for faster debugging.
 
-# Copy project files
-COPY ["FunctionApp1.csproj", "./"]
-RUN dotnet restore "FunctionApp1.csproj"
-
-# Copy remaining source code
-COPY . .
-
-# Build the project
-RUN dotnet build "FunctionApp1.csproj" -c Release -o /app/build
-
-# Publish stage
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS publish
-WORKDIR /src
-COPY --from=builder /app/build .
-RUN dotnet publish "FunctionApp1.csproj" -c Release -o /app/publish
-
-# Runtime stage - use Azure Functions base image
-FROM mcr.microsoft.com/azure-functions/dotnet-isolated:4.0-dotnet-isolated10.0
-ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
-    AzureFunctionsJobHost__Logging__Console__IsEnabled=true
-
+# This stage is used when running from VS in fast mode (Default for Debug configuration)
+FROM mcr.microsoft.com/azure-functions/dotnet-isolated:4-dotnet-isolated10.0 AS base
 WORKDIR /home/site/wwwroot
-COPY --from=publish /app/publish .
-
 EXPOSE 80
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost/health || exit 1
+
+# This stage is used to build the service project
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG BUILD_CONFIGURATION=Release
+WORKDIR /src
+COPY ["FunctionApp1/FunctionApp1.csproj", "FunctionApp1/"]
+RUN dotnet restore "./FunctionApp1/FunctionApp1.csproj"
+COPY . .
+WORKDIR "/src/FunctionApp1"
+RUN dotnet build "./FunctionApp1.csproj" -c $BUILD_CONFIGURATION -o /app/build
+
+# This stage is used to publish the service project to be copied to the final stage
+FROM build AS publish
+ARG BUILD_CONFIGURATION=Release
+RUN dotnet publish "./FunctionApp1.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+
+# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
+FROM base AS final
+WORKDIR /home/site/wwwroot
+COPY --from=publish /app/publish .
+ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
+    AzureFunctionsJobHost__Logging__Console__IsEnabled=true

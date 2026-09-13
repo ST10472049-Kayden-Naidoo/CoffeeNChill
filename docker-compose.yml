@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: azurite-emulator
+    ports:
+      - "10000:10000"  # Table Storage
+      - "10001:10001"  # Blob Storage
+      - "10002:10002"  # Queue Storage
+    volumes:
+      - azurite_data:/data
+    command: >
+      azurite
+      --tableHost 0.0.0.0
+      --blobHost 0.0.0.0
+      --queueHost 0.0.0.0
+    networks:
+      - coffeenchill-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10000/devstoreaccount1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  coffeenchill-functions:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coffeenchill-functions
+    ports:
+      - "7071:80"
+    environment:
+      - AzureWebJobsStorage=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10002/devstoreaccount1;
+      - FUNCTIONS_WORKER_RUNTIME=dotnet-isolated
+      - AzureWebJobsDashboard=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10002/devstoreaccount1;
+    depends_on:
+      azurite:
+        condition: service_healthy
+    networks:
+      - coffeenchill-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/menu"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  azurite_data:
+    driver: local
+
+networks:
+  coffeenchill-network:
+    driver: bridge
